@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pt
+*.bin
+*.ckpt
+*.log
+*.tmp
+*.lock
+*.cache/
+data/raw/
+models/*/
+!models/.gitkeep
