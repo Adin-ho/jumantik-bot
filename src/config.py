@@ -1,20 +1,22 @@
-from pydantic import BaseModel
 from pathlib import Path
+from pydantic import BaseModel
+
+ROOT = Path(__file__).resolve().parents[1]
 
 class Settings(BaseModel):
-    intent_model_name: str = "indobenchmark/indobert-lite-base-p2"
-    ner_model_name: str = "indobenchmark/indobert-lite-base-p2"
-    embed_model_name: str = "LazarusNLP/all-indo-e5-small-v4"
+    root_dir: Path = ROOT
+    models_dir: Path = ROOT / "models"
 
-    data_dir: Path = Path("data")
-    models_dir: Path = Path("models")
-
+    # INTENT
     intent_hf_dir: Path = models_dir / "intent_hf"
-    ner_hf_dir: Path = models_dir / "ner_hf"
     intent_onnx_dir: Path = models_dir / "intent_onnx"
+
+    # NER
+    ner_hf_dir: Path = models_dir / "ner_hf"
     ner_onnx_dir: Path = models_dir / "ner_onnx"
 
-    kb_csv: Path = data_dir / "kb.csv"
-    kb_index_dir: Path = models_dir / "kb_faiss"
+    # Data (opsional untuk evaluasi)
+    data_dir: Path = ROOT / "data"
+    intent_val_csv: Path = data_dir / "intent_val.csv"
 
 settings = Settings()

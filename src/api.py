@@ -1,68 +1,69 @@
-from fastapi import FastAPI
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
-from src.inference import IntentPredictor, NERTagger, RAG, compose_answer
+from src.inference import IntentPredictor, NERTagger, compose_answer, extract_structured
 
-app = FastAPI(title="Jumantik Chatbot API", version="0.1.0")
+app = FastAPI(title="Jumantik Chatbot API")
 
+# init model sekali di startup
 intent = IntentPredictor()
 ner = NERTagger()
-rag = None
+
+# RAG opsional (aman bila tidak ada)
 try:
-    rag = RAG()
+    from src.rag import Retriever, synthesize_answer
+    try:
+        retriever = Retriever()  # misal: load models/rag/index.pkl
+    except Exception:
+        retriever = None
 except Exception:
-    rag = None
+    retriever = None
 
 class QueryIn(BaseModel):
     text: str
-
-class IntentOut(BaseModel):
-    intent: str
-    confidence: float
 
 class Entity(BaseModel):
     type: str
     text: str
 
-class SearchItem(BaseModel):
-    title: str
-    url: str | None = None
-    section: str | None = None
-    text: str
-    score: float
-
-class AnswerOut(BaseModel):
-    intent: IntentOut
-    entities: List[Entity] = []
-    passages: List[SearchItem] = []
-    answer: str
-
 @app.get("/health")
 def health():
-    return {"status":"ok"}
+    return {"status": "ok"}
 
-@app.post("/intent", response_model=IntentOut)
+@app.post("/intent")
 def predict_intent(q: QueryIn):
-    pi = intent.predict(q.text)
-    return IntentOut(**pi)
+    return intent.predict(q.text)
 
-@app.post("/ner", response_model=List[Entity])
-def predict_ner(q: QueryIn):
-    ents = [Entity(**e) for e in ner.tag(q.text)]
-    return ents
+@app.post("/ner")
+def predict_ner(q: QueryIn) -> List[Entity]:
+    ents = ner.tag(q.text)
+    return [Entity(**e) for e in ents]
 
-@app.post("/search", response_model=List[SearchItem])
-def search(q: QueryIn):
-    if not rag: return []
-    res = [SearchItem(**r) for r in rag.search(q.text)]
-    return res
-
-@app.post("/answer", response_model=AnswerOut)
+@app.post("/answer")
 def answer(q: QueryIn):
     pi = intent.predict(q.text)
-    ents = [e for e in ner.tag(q.text)]
-    passages = rag.search(q.text, k=5) if rag else []
-    ans = compose_answer(pi["intent"], ents, passages)
-    return AnswerOut(intent=pi, entities=[Entity(**e) for e in ents],
-                     passages=[SearchItem(**p) for p in passages],
-                     answer=ans)
+    ents = ner.tag(q.text)
+    fields = extract_structured(q.text, ents)
+    ans = compose_answer(pi["intent"], ents)
+    return {"intent": pi, "entities": ents, "fields": fields, "answer": ans}
+
+@app.post("/search")
+def search(q: QueryIn):
+    if retriever is None:
+        raise HTTPException(status_code=404, detail="RAG index belum tersedia. Jalankan: python -m src.rag_build")
+    return retriever.search(q.text, k=5)
+
+INTENT_THRESHOLD = 0.35
+
+@app.post("/answer")
+def answer(q: QueryIn):
+    pi = intent.predict(q.text)
+    ents = ner.tag(q.text)
+    fields = extract_structured(q.text, ents)
+    if pi["confidence"] < INTENT_THRESHOLD:
+        return {
+            "intent": pi, "entities": ents, "fields": fields,
+            "answer": "Saya belum yakin maksudnya. Apakah ingin tanya jadwal jumantik, lapor jentik, atau prosedur fogging?"
+        }
+    ans = compose_answer(pi["intent"], ents)
+    return {"intent": pi, "entities": ents, "fields": fields, "answer": ans}
