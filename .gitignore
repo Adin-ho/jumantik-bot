@@ -10,3 +10,4 @@ __pycache__/
 data/raw/
 models/*/
 !models/.gitkeep
+.env
