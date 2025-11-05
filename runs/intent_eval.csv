@@ -1,0 +1,4 @@
+text,gold,pred,conf
+Jumantik RW 03 datang hari apa?,jadwal_kunjungan,prosedur_fogging,0.21532969176769257
+Untuk surat SKD perlu apa saja?,syarat_surat,biaya_surat,0.18958362936973572
+Saya ingin lapor jentik di rumah,lapor_jentik,prosedur_fogging,0.1740489900112152

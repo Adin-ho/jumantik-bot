@@ -1,19 +1,21 @@
-# Skeleton: baca semua .txt di data/raw jadi data/kb.csv
+# src/build_kb.py
 from pathlib import Path
-import csv
+import pandas as pd
+import json
 
-RAW = Path("data/raw")
+INP = Path("data/kb/raw/data_chatbot_jumantik.csv")  # file kamu
 OUT = Path("data/kb.csv")
 
 def main():
-    rows = []
-    for p in RAW.glob("**/*.txt"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        rows.append({"title": p.stem, "url":"", "section":"", "text":text})
-    with open(OUT, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["title","url","section","text"])
-        w.writeheader()
-        w.writerows(rows)
+    df = pd.read_csv(INP)  # kolom: id,pertanyaan,jawaban,sumber
+    df = df.rename(columns={
+        "pertanyaan": "question",
+        "jawaban": "answer",
+        "sumber": "source"
+    })
+    # Simpan ringkas untuk embed
+    df[["id","question","answer","source"]].to_csv(OUT, index=False)
+    print("KB saved to", OUT)
 
 if __name__ == "__main__":
     main()
