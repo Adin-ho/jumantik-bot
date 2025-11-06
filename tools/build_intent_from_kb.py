@@ -1,76 +1,76 @@
-# tools/build_intent_from_kb.py
-import re
+import random
 import pandas as pd
-from pathlib import Path
-from sklearn.model_selection import train_test_split
+from collections import Counter
+from src.config import settings
 
-ROOT = Path(__file__).resolve().parents[1]
-KB = ROOT / "data" / "kb" / "raw" / "data_chatbot_jumantik.csv"
-OUT_TRAIN = ROOT / "data" / "intent_train.csv"
-OUT_VAL = ROOT / "data" / "intent_val.csv"
-
-# Target label final yang kita pakai
-TARGET_LABELS = [
-    "jadwal_kunjungan",
-    "lapor_jentik",
-    "prosedur_fogging",
-    "biaya_surat",
-    "syarat_surat",
-]
-
-# Aturan ringan untuk memetakan pertanyaan KB -> intent
+# mapping judul kb -> intent (contoh—silakan sesuaikan kebutuhanmu)
 RULES = [
-    ("jadwal_kunjungan", r"\b(jadwal|kapan.*jumantik|kunjungan)\b"),
-    ("lapor_jentik", r"\b(lapor|melapor|jentik|ada.*jentik)\b"),
-    ("prosedur_fogging", r"\b(fogging|pengasapan|asap)\b"),
-    ("biaya_surat", r"\b(biaya|bayar|tarif|harga).*(surat|pengantar)\b"),
-    ("syarat_surat", r"\b(syarat|dokumen|berkas).*(surat|pengantar)\b"),
+    ("lapor", "lapor_jentik"),
+    ("jadwal", "jadwal_kunjungan"),
+    ("fogging", "prosedur_fogging"),
+    ("biaya", "biaya_surat"),
+    ("syarat", "syarat_surat"),
 ]
 
-def label_by_rules(text: str) -> str | None:
-    t = text.lower()
-    for lbl, pat in RULES:
-        if re.search(pat, t):
-            return lbl
+MIN_PER_CLASS = 8
+VAL_RATIO = 0.2
+RND = random.Random(42)
+
+def infer_intent_from_title(title: str) -> str | None:
+    t = title.lower()
+    for kw, intent in RULES:
+        if kw in t:
+            return intent
     return None
 
 def main():
-    df = pd.read_csv(KB)  # kolom: id, pertanyaan, jawaban, sumber
-    df = df.rename(columns={c: c.strip().lower() for c in df.columns})
-
+    df = pd.read_csv(settings.kb_csv)
     rows = []
     for _, r in df.iterrows():
-        q = str(r.get("pertanyaan", "")).strip()
-        if not q:
+        title = str(r["title"])
+        intent = infer_intent_from_title(title)
+        if intent:
+            rows.append({"text": title, "intent": intent})
+    raw = pd.DataFrame(rows)
+    print("Raw label counts:\n", raw["intent"].value_counts())
+
+    # balance via simple augmentation (duplikasi ringan)
+    by_label = {lbl: raw[raw["intent"] == lbl]["text"].tolist() for lbl in set(raw["intent"])}
+    # pastikan semua label penting ada walau kosong
+    for must in ["lapor_jentik", "jadwal_kunjungan", "prosedur_fogging", "biaya_surat", "syarat_surat"]:
+        by_label.setdefault(must, [])
+
+    balanced = []
+    for lbl, texts in by_label.items():
+        if len(texts) == 0:
             continue
-        lab = label_by_rules(q)
-        if lab:
-            rows.append({"text": q, "intent": lab})
+        pool = texts.copy()
+        while len(pool) < MIN_PER_CLASS:
+            pool.append(RND.choice(texts))
+        balanced += [{"text": t, "intent": lbl} for t in pool[:MIN_PER_CLASS]]
 
-    data = pd.DataFrame(rows)
-    # drop duplikat pertanyaan agar clean
-    data = data.drop_duplicates(subset=["text"]).reset_index(drop=True)
+    out = pd.DataFrame(balanced)
+    print("\nBalanced label counts:\n", out["intent"].value_counts())
 
-    # Jaga agar hanya label target
-    data = data[data["intent"].isin(TARGET_LABELS)].reset_index(drop=True)
+    # split train/val stratified sederhana
+    train_rows, val_rows = [], []
+    for lbl, grp in out.groupby("intent"):
+        n = len(grp)
+        k = max(1, int(VAL_RATIO * n))
+        idx = list(grp.index)
+        RND.shuffle(idx)
+        val_idx = set(idx[:k])
+        for i, row in grp.iterrows():
+            (val_rows if i in val_idx else train_rows).append(row)
 
-    # (opsional) minimal 20 contoh/label → bisa mulai dari 8–10 dulu
-    counts = data["intent"].value_counts()
-    print("Label counts:\n", counts, "\n")
+    train = pd.DataFrame(train_rows)
+    val = pd.DataFrame(val_rows)
 
-    if data.empty or counts.min() < 5:
-        print("⚠️  Data terlalu sedikit / tidak seimbang. Tambah contoh atau longgarkan RULES.")
-    
-    X_train, X_val = train_test_split(
-        data, test_size=0.2, stratify=data["intent"], random_state=42
-        if data['intent'].nunique() > 1 and counts.min() >= 2 else None
-    )
-
-    OUT_TRAIN.parent.mkdir(parents=True, exist_ok=True)
-    X_train.to_csv(OUT_TRAIN, index=False)
-    X_val.to_csv(OUT_VAL, index=False)
-    print("Saved:", OUT_TRAIN)
-    print("Saved:", OUT_VAL)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    train.to_csv(settings.intent_train_csv, index=False, encoding="utf-8")
+    val.to_csv(settings.intent_val_csv, index=False, encoding="utf-8")
+    print(f"\nSaved: {settings.intent_train_csv}")
+    print(f"Saved: {settings.intent_val_csv}")
 
 if __name__ == "__main__":
     main()

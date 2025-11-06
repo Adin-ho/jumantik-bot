@@ -1,4 +1,4 @@
-﻿text,intent
-"Jumantik RW 03 datang hari apa?","jadwal_kunjungan"
-"Untuk surat SKD perlu apa saja?","syarat_surat"
-"Saya ingin lapor jentik di rumah","lapor_jentik"
+text,intent
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Apa gunanya laporan jentik dari warga?,lapor_jentik
+Apakah fogging cukup buat mencegah DBD?,prosedur_fogging

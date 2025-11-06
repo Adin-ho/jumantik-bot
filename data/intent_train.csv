@@ -1,8 +1,22 @@
-﻿text,intent
-"Pak, jadwal jumantik di RW 05 kapan ya?","jadwal_kunjungan"
-"Mau buat surat domisili, syaratnya apa ya?","syarat_surat"
-"Rumah saya ada jentik banyak, gimana cara lapornya?","lapor_jentik"
-"Nomor telepon kantor kelurahan berapa?","kontak_kelurahan"
-"Apa itu PSN 3M Plus?","edukasi_psn"
-"Biaya buat surat pengantar nikah berapa?","biaya_surat"
-"Bagaimana prosedur fogging nyamuk?","prosedur_fogging"
+text,intent
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Bagaimana warga tahu jadwal pemeriksaan Jumantik?,jadwal_kunjungan
+Mengapa laporan warga penting bagi kelurahan?,lapor_jentik
+Apa gunanya laporan jentik dari warga?,lapor_jentik
+Apakah warga bisa lihat hasil laporan jentik di wilayahnya?,lapor_jentik
+Ada gak sih aplikasi buat laporan jentik secara online?,lapor_jentik
+Bagaimana cara mengisi laporan hasil pemeriksaan jentik?,lapor_jentik
+Bagaimana melaporkan hasil pemeriksaan ke Puskesmas?,lapor_jentik
+Bagaimana cara membuat laporan mingguan Jumantik yang baik?,lapor_jentik
+Apakah fogging cukup buat mencegah DBD?,prosedur_fogging
+Bagaimana cara kelurahan tahu daerah yang harus difogging?,prosedur_fogging
+Apakah Jumantik bekerja sama dengan petugas fogging?,prosedur_fogging
+Apakah Jumantik bekerja sama dengan petugas fogging?,prosedur_fogging
+Apakah fogging cukup buat mencegah DBD?,prosedur_fogging
+Apakah Jumantik bekerja sama dengan petugas fogging?,prosedur_fogging
+Bagaimana cara kelurahan tahu daerah yang harus difogging?,prosedur_fogging
