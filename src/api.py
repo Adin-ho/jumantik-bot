@@ -1,53 +1,87 @@
 # src/api.py
-from __future__ import annotations
 from fastapi import FastAPI, HTTPException
-from typing import Optional, Dict, Any
-import math
+from pydantic import BaseModel
+import os, warnings
 
-from src.rag import RAGSearcher
-from src.inference import IntentPredictor, NERTagger, compose_answer
+# Hindari spam warning
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 app = FastAPI()
 
-rag_searcher: Optional[RAGSearcher] = None
-intent_pred: Optional[IntentPredictor] = None
-ner_tagger: Optional[NERTagger] = None
+# ==== LAZY SINGLETONS ====
+_INTENT = None
+_NER = None
+_RAG = None
 
-@app.on_event("startup")
-def _startup():
-    global rag_searcher, intent_pred, ner_tagger
-    try:
-        rag_searcher = RAGSearcher("data/kb/index")
-        print("[RAG] Index & model siap.")
-    except Exception as e:
-        rag_searcher = None
-        print(f"[RAG] Gagal inisialisasi: {e}")
-    try:
-        intent_pred = IntentPredictor()
-        ner_tagger  = NERTagger()
-    except Exception as e:
-        print(f"[NLP] Inisialisasi intent/ner gagal: {e}")
+def get_intent():
+    global _INTENT
+    if _INTENT is None:
+        from src.inference import IntentPredictor
+        _INTENT = IntentPredictor()
+    return _INTENT
+
+def get_ner():
+    global _NER
+    if _NER is None:
+        from src.inference import NERTagger
+        _NER = NERTagger()
+    return _NER
+
+def get_rag():
+    global _RAG
+    if _RAG is None:
+        from src.rag import RAGSearcher
+        _RAG = RAGSearcher()   # pastikan RAG tidak load apa-apa yang NaN
+    return _RAG
+
+class Query(BaseModel):
+    text: str
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+@app.post("/intent")
+def intent(q: Query):
+    pred = get_intent().predict(q.text)
+    return pred
+
+@app.post("/ner")
+def ner(q: Query):
+    ents = get_ner().tag(q.text)
+    return ents
+
+@app.post("/answer")
+def answer(q: Query):
+    out = get_intent().predict(q.text)
+    ents = get_ner().tag(q.text)
+    from src.inference import compose_answer
+    ans = compose_answer(out["intent"], ents)
+    return {
+        "intent": {"intent": out["intent"], "confidence": float(out["confidence"])},
+        "entities": ents,
+        "answer": ans,
+    }
+
 @app.post("/search")
-def search(q: Dict[str, Any]):
-    global rag_searcher
-    if rag_searcher is None:
-        raise HTTPException(
-            status_code=503,
-            detail="RAG index belum tersedia. Jalankan: python -m src.build_kb && python -m src.embed_kb",
-        )
-    text = (q or {}).get("text", "")
-    if not isinstance(text, str) or not text.strip():
-        raise HTTPException(status_code=400, detail="Field 'text' wajib diisi.")
-    res = rag_searcher.search(text, top_k=3)
-    # sanitize terakhir agar aman JSON
-    for r in res:
-        s = float(r.get("score", 0.0))
-        if not math.isfinite(s):
-            s = -1e9
-        r["score"] = s
-    return {"query": text, "results": res}
+def search(q: Query):
+    try:
+        res = get_rag().search(q.text, top_k=3)
+        # Pastikan tidak ada NaN
+        for r in res:
+            if r.get("score") is None or (r["score"] != r["score"]):  # NaN check
+                r["score"] = 0.0
+        return {"query": q.text, "results": res}
+    except FileNotFoundError as e:
+        raise HTTPException(404, detail=str(e))
+
+@app.post("/answer_rag")
+def answer_rag(q: Query):
+    res = get_rag().search(q.text, top_k=3)
+    text_chunks = [r.get("text","") for r in res]
+    if not text_chunks:
+        return {"answer": "Maaf, belum ada referensi di KB."}
+    # Ringkas sangat sederhana (placeholder)
+    summary = text_chunks[0][:500]
+    return {"answer": summary, "sources": res}

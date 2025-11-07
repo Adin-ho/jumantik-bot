@@ -70,22 +70,21 @@ def main():
 
     collator = DataCollatorWithPadding(tokenizer=tok)
 
-    training_args = TrainingArguments(
-        output_dir=str(settings.intent_hf_dir),
-        num_train_epochs=8,
-        learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=32,
+    # --- di src/train_intent.py (ganti argumen training) ---
+    args = TrainingArguments(
+        output_dir=str(model_dir),
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        learning_rate=2e-5,          # lebih konservatif
+        num_train_epochs=12,          # dari 8 -> 12
         weight_decay=0.01,
-        warmup_ratio=0.1,
+        warmup_ratio=0.1,             # tambahkan warmup
         evaluation_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_f1_macro",
-        greater_is_better=True,
-        seed=42,
+        save_strategy="no",
         logging_steps=10,
-        save_total_limit=2,
+        load_best_model_at_end=False,
+        report_to="none",
+        seed=42,
     )
 
     trainer = Trainer(
