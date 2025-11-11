@@ -1,87 +1,74 @@
-# src/api.py
-from fastapi import FastAPI, HTTPException
+from __future__ import annotations
+
+from fastapi import FastAPI, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
-import os, warnings
+from pathlib import Path
 
-# Hindari spam warning
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-warnings.filterwarnings("ignore", category=FutureWarning)
+from .simple_nlp import (
+    infer_intent,
+    infer_ner,
+    answer_rule_or_rag,
+)
 
-app = FastAPI()
+ROOT = Path(__file__).resolve().parents[1]
+WEB_DIR = ROOT / "web"
 
-# ==== LAZY SINGLETONS ====
-_INTENT = None
-_NER = None
-_RAG = None
+app = FastAPI(title="Jumantik-Bot API", version="1.0.0")
 
-def get_intent():
-    global _INTENT
-    if _INTENT is None:
-        from src.inference import IntentPredictor
-        _INTENT = IntentPredictor()
-    return _INTENT
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def get_ner():
-    global _NER
-    if _NER is None:
-        from src.inference import NERTagger
-        _NER = NERTagger()
-    return _NER
-
-def get_rag():
-    global _RAG
-    if _RAG is None:
-        from src.rag import RAGSearcher
-        _RAG = RAGSearcher()   # pastikan RAG tidak load apa-apa yang NaN
-    return _RAG
-
-class Query(BaseModel):
+class TextReq(BaseModel):
     text: str
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "msg": "ready"}
 
 @app.post("/intent")
-def intent(q: Query):
-    pred = get_intent().predict(q.text)
-    return pred
+def intent_api(req: TextReq):
+    return infer_intent(req.text)
 
 @app.post("/ner")
-def ner(q: Query):
-    ents = get_ner().tag(q.text)
-    return ents
+def ner_api(req: TextReq):
+    return infer_ner(req.text)
 
 @app.post("/answer")
-def answer(q: Query):
-    out = get_intent().predict(q.text)
-    ents = get_ner().tag(q.text)
-    from src.inference import compose_answer
-    ans = compose_answer(out["intent"], ents)
+def answer_api(req: TextReq):
+    return answer_rule_or_rag(req.text)
+
+# Endpoint demo yang dipakai oleh web tester
+@app.post("/demo")
+def demo_api(req: TextReq):
+    intent = infer_intent(req.text)
+    ents = infer_ner(req.text)
+    ans = answer_rule_or_rag(req.text)
     return {
-        "intent": {"intent": out["intent"], "confidence": float(out["confidence"])},
+        "intent": intent,
         "entities": ents,
-        "answer": ans,
+        "answer": ans.get("answer"),
+        "source": ans.get("source"),
+        "results": ans.get("results", []),
     }
 
-@app.post("/search")
-def search(q: Query):
-    try:
-        res = get_rag().search(q.text, top_k=3)
-        # Pastikan tidak ada NaN
-        for r in res:
-            if r.get("score") is None or (r["score"] != r["score"]):  # NaN check
-                r["score"] = 0.0
-        return {"query": q.text, "results": res}
-    except FileNotFoundError as e:
-        raise HTTPException(404, detail=str(e))
+# ---------- Static web (simple tester) ----------
+@app.get("/web/", response_class=HTMLResponse)
+def web_index():
+    index = WEB_DIR / "index.html"
+    if not index.exists():
+        return HTMLResponse("<h1>Web tester tidak ditemukan</h1>", status_code=404)
+    return HTMLResponse(index.read_text(encoding="utf-8"))
 
-@app.post("/answer_rag")
-def answer_rag(q: Query):
-    res = get_rag().search(q.text, top_k=3)
-    text_chunks = [r.get("text","") for r in res]
-    if not text_chunks:
-        return {"answer": "Maaf, belum ada referensi di KB."}
-    # Ringkas sangat sederhana (placeholder)
-    summary = text_chunks[0][:500]
-    return {"answer": summary, "sources": res}
+@app.get("/favicon.ico")
+def favicon():
+    fav = WEB_DIR / "favicon.ico"
+    if fav.exists():
+        return FileResponse(str(fav))
+    return JSONResponse({}, status_code=404)

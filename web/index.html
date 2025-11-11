@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jumantik-Bot — Web Tester</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-3xl mx-auto p-6">
+    <h1 class="text-2xl font-bold mb-4">Jumantik-Bot — Web Tester</h1>
+
+    <div class="bg-white rounded-2xl shadow p-5 space-y-4">
+      <label class="block text-sm font-medium">Masukkan Pertanyaan</label>
+      <textarea id="inp" rows="4" class="w-full border rounded-xl p-3 focus:outline-none focus:ring" placeholder="Contoh: Saya Adi di Jl. Mawar RT 05 RW 03 mau lapor jentik"></textarea>
+
+      <div class="flex gap-2">
+        <button id="btn" class="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700">Kirim</button>
+        <button id="ex1" class="px-4 py-2 rounded-xl bg-slate-200 hover:bg-slate-300">Contoh 1</button>
+        <button id="ex2" class="px-4 py-2 rounded-xl bg-slate-200 hover:bg-slate-300">Contoh 2</button>
+        <button id="ex3" class="px-4 py-2 rounded-xl bg-slate-200 hover:bg-slate-300">Contoh 3</button>
+      </div>
+
+      <div id="loading" class="hidden text-sm text-slate-500">Memproses…</div>
+      <div id="out" class="space-y-4"></div>
+    </div>
+
+    <p class="text-xs text-slate-500 mt-4">Endpoint: <code>/demo</code>. Buka <code>/healthz</code> untuk cek status server.</p>
+  </div>
+
+  <script>
+    const API = location.origin;
+    const $ = (s)=>document.querySelector(s);
+    const out = $("#out");
+    const loading = $("#loading");
+
+    function card(title, html) {
+      return `
+        <div class="border rounded-2xl p-4">
+          <div class="font-semibold mb-1">${title}</div>
+          <div class="text-sm whitespace-pre-wrap">${html}</div>
+        </div>`;
+    }
+    function fmtTopk(topk) {
+      if (!Array.isArray(topk) || !topk.length) return "-";
+      return topk.map(x => `• ${x.intent} — ${(Number(x.confidence||0)*100).toFixed(2)}%`).join("\n");
+    }
+    function fmtEnts(ents) {
+      if (!Array.isArray(ents) || !ents.length) return "-";
+      return ents.map(e => `• ${e.type}: ${e.text}`).join("\n");
+    }
+    function fmtRefs(refs) {
+      if (!Array.isArray(refs) || !refs.length) return "";
+      return card("Referensi", refs.map((s,i)=>`[${i+1}] ${s}`).join("\n"));
+    }
+
+    async function callDemo(text) {
+      loading.classList.remove("hidden");
+      out.innerHTML = "";
+      try {
+        const r = await fetch(API + "/demo", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ text })
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+
+        const intent = data.intent || {};
+        const ents = data.entities || [];
+        const ans  = data.answer || {};
+
+        out.innerHTML =
+          card("Teks", data.text || "-") +
+          card("Intent",
+            `Prediksi: ${intent.intent || "-"}\n` +
+            `Confidence: ${((Number(intent.confidence)||0)*100).toFixed(2)}%\n\n` +
+            `Top-K:\n${fmtTopk(intent.topk)}`
+          ) +
+          card("Entitas (NER)", fmtEnts(ents)) +
+          card("Jawaban", `Mode: ${ans.mode || "-"}\n\n${ans.answer || ans.text || "-"}`) +
+          fmtRefs(ans.refs || []);
+
+      } catch (e) {
+        out.innerHTML = card("Error", String(e));
+      } finally {
+        loading.classList.add("hidden");
+      }
+    }
+
+    $("#btn").addEventListener("click", ()=>{
+      const text = $("#inp").value.trim();
+      if (!text) return alert("Isi pertanyaan terlebih dahulu.");
+      callDemo(text);
+    });
+
+    $("#ex1").addEventListener("click", ()=>{
+      $("#inp").value = "Saya Adi di Jl. Mawar RT 05 RW 03 mau lapor jentik";
+      callDemo($("#inp").value);
+    });
+    $("#ex2").addEventListener("click", ()=>{
+      $("#inp").value = "Pak, Jumantik RW 05 kapan datang?";
+      callDemo($("#inp").value);
+    });
+    $("#ex3").addEventListener("click", ()=>{
+      $("#inp").value = "Apa itu PSN 3M Plus dan apakah fogging wajib?";
+      callDemo($("#inp").value);
+    });
+  </script>
+</body>
+</html>
