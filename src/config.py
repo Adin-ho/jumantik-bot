@@ -1,39 +1,42 @@
 from pathlib import Path
-from pydantic import BaseModel
 
+# ====== ROOT ======
 ROOT = Path(__file__).resolve().parents[1]
 
-class Settings(BaseModel):
-    # ===== Paths umum
-    root: Path = ROOT
-    data_dir: Path = ROOT / "data"
-    models_dir: Path = ROOT / "models"
+# ====== Helper pilih path yang ada ======
+def pick_first_existing(*candidates: Path) -> Path:
+    for p in candidates:
+        if p.exists():
+            return p
+    # kalau semua belum ada, kembalikan kandidat pertama (supaya error-nya jelas)
+    return candidates[0]
 
-    # ===== Intent dataset (CSV)
-    intent_train_csv: Path = data_dir / "intent_train.csv"
-    intent_val_csv: Path = data_dir / "intent_val.csv"
+# ====== DIRS ======
+DATA_DIR = ROOT / "data"
+DATA_KB_DIR = DATA_DIR / "kb"
+MODELS_DIR = ROOT / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ===== Folder model Hugging Face + ONNX untuk Intent
-    intent_hf_dir: Path = models_dir / "intent_hf"
-    intent_onnx_dir: Path = models_dir / "intent_onnx"
+# ====== DATASETS (cari di dua lokasi: /data/kb dan /data) ======
+INTENT_TRAIN = pick_first_existing(DATA_KB_DIR / "intent_train.csv", DATA_DIR / "intent_train.csv")
+INTENT_VAL   = pick_first_existing(DATA_KB_DIR / "intent_val.csv",   DATA_DIR / "intent_val.csv")
+KB_CSV       = pick_first_existing(DATA_KB_DIR / "kb.csv",           DATA_DIR / "kb.csv")
 
-    # ===== Folder model Hugging Face + ONNX untuk NER (opsional, jika pakai)
-    ner_hf_dir: Path = models_dir / "ner_hf"
-    ner_onnx_dir: Path = models_dir / "ner_onnx"
+SCHEDULE_JSON = DATA_KB_DIR / "schedule.json"  # letak jadwal
 
-    # ===== Knowledge Base & RAG
-    kb_raw_csv: Path = data_dir / "kb" / "raw" / "data_chatbot_jumantik.csv"  # sumber mentah (opsional)
-    kb_csv: Path = data_dir / "kb.csv"                                        # hasil build_kb.py
-    kb_index_dir: Path = data_dir / "kb" / "index"
-    kb_faiss: Path = kb_index_dir / "faiss.index"
-    kb_ids: Path = kb_index_dir / "ids.npy"
-    kb_meta: Path = kb_index_dir / "meta.json"
-    embed_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# ====== ANSWER MODE ======
+ANSWER_MODE = "hybrid"   # "rule" | "rag" | "hybrid"
+INTENT_CONFIDENCE_MIN = 0.38
+RAG_MIN_SIM = 0.18
 
-    # ===== Model backbone untuk fine-tuning intent
-    intent_model_name: str = "indolem/indobert-base-uncased"
+# ====== FALLBACK ======
+FALLBACK_ANSWER = (
+    "Maaf, aku belum nemu jawaban yang pas. "
+    "Coba tuliskan pertanyaan lebih spesifik (mis. sertakan RT/RW/Alamat)."
+)
 
-    # ===== ONNX Runtime
-    onnx_providers: list[str] = ["CPUExecutionProvider"]
-
-settings = Settings()
+# ====== SAVE FILES ======
+INTENT_VECT_PATH = MODELS_DIR / "intent_tfidf.pkl"
+INTENT_CLF_PATH  = MODELS_DIR / "intent_clf.pkl"
+KB_VECT_PATH     = MODELS_DIR / "kb_tfidf.pkl"
+KB_TEXTS_PATH    = MODELS_DIR / "kb_texts.pkl"

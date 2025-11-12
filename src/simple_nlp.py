@@ -1,230 +1,232 @@
 from __future__ import annotations
-
-from typing import List, Dict, Any
-from pathlib import Path
 import re
+import pickle
+from typing import List, Tuple, Dict, Any
+from pathlib import Path
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp
-
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.svm import LinearSVC
+from sklearn.pipeline import make_pipeline
 
+from .config import (
+    INTENT_TRAIN, INTENT_VAL, KB_CSV,
+    INTENT_VECT_PATH, INTENT_CLF_PATH,
+    KB_VECT_PATH, KB_TEXTS_PATH,
+    INTENT_CONFIDENCE_MIN, RAG_MIN_SIM,
+    FALLBACK_ANSWER, ANSWER_MODE,
+)
+from .utils_data import get_schedule_for_rw, advance_after_visit
 
-# ===================== Helper path & normalizer =====================
-
-ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
-
+# ---------- Utilities ----------
 def normalize_text(s: str) -> str:
-    """Normalisasi ringan: lowercase + spasi rapih."""
-    if not isinstance(s, str):
-        return ""
-    s = s.strip().lower()
-    # seragamkan penulisan alamat umum
-    s = s.replace("jalan", "jl").replace("jln", "jl").replace("jl.", "jl")
-    s = re.sub(r"\s+", " ", s)
+    s = s.lower()
+    s = re.sub(r"[^\w\s/]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
-
-# ===================== INTENT (scikit-learn) =====================
-
-_INTENT_LABELS: List[str] = []
-_INTENT_PIPE: Pipeline | None = None
-
-
-def _load_intent_df() -> pd.DataFrame:
-    train_csv = DATA / "intent_train.csv"
-    val_csv   = DATA / "intent_val.csv"
-    if not train_csv.exists():
-        raise RuntimeError(f"File tidak ditemukan: {train_csv}")
-
-    def _read(p: Path) -> pd.DataFrame:
-        return pd.read_csv(p, encoding="utf-8-sig")
-
-    df = _read(train_csv)
-    if val_csv.exists():
-        try:
-            df2 = _read(val_csv)
-            df = pd.concat([df, df2], ignore_index=True)
-        except Exception:
-            pass
-
-    # deteksi kolom (robust terhadap variasi nama kolom)
-    cols = {c.lower().strip(): c for c in df.columns}
-    text_col = cols.get("text", list(df.columns)[0])
-    intent_col = cols.get("intent", list(df.columns)[1] if len(df.columns) > 1 else list(df.columns)[0])
-
-    out = pd.DataFrame({
-        "text": df[text_col].map(normalize_text),
-        "intent": df[intent_col].map(lambda x: str(x).strip().lower().replace(" ", "_")),
-    })
-    out = out[(out["text"] != "") & (out["intent"] != "")].drop_duplicates()
-    return out
-
-
-def train_intent_if_needed() -> None:
-    """Latih sekali saat dipakai pertama kali. Aman untuk dataset kecil."""
-    global _INTENT_PIPE, _INTENT_LABELS
-    if _INTENT_PIPE is not None:
-        return
-
-    df = _load_intent_df()
-    labels = sorted(df["intent"].unique().tolist())
-    _INTENT_LABELS = labels
-
-    # Jika hanya ada 1 kelas, buat dummy yang selalu proba=1 untuk kelas tsb
-    if len(labels) == 1:
-        class DummyClf:
-            classes_ = np.array(labels)
-            def fit(self, X, y=None): return self
-            def predict_proba(self, X): return np.tile(np.array([[1.0]]), (len(X), 1))
-        class Stacker:
-            def fit(self, X, y=None): return self
-            def transform(self, X): return sp.csr_matrix((len(X), 1))
-        _INTENT_PIPE = Pipeline([("stack", Stacker()), ("clf", DummyClf())])
-        _INTENT_PIPE.fit(df["text"].tolist(), df["intent"].tolist())
-        return
-
-    # Gabungan fitur word bi-gram + char 3–5
-    word = TfidfVectorizer(ngram_range=(1, 2), min_df=1, lowercase=True)
-    char = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
-
-    class Stacker:
-        def fit(self, X, y=None):
-            self.w = word.fit(X, y)
-            self.c = char.fit(X, y)
-            return self
-        def transform(self, X):
-            return sp.hstack([self.w.transform(X), self.c.transform(X)], format="csr")
-
-    clf = LogisticRegression(
-        max_iter=1000,
-        class_weight="balanced",
-        solver="liblinear",   # stabil untuk data kecil
-        multi_class="auto",
-    )
-
-    _INTENT_PIPE = Pipeline([
-        ("stack", Stacker()),
-        ("clf", clf),
-    ])
-
-    _INTENT_PIPE.fit(df["text"].tolist(), df["intent"].tolist())
-
-
-def infer_intent(text: str) -> Dict[str, Any]:
-    """Kembalikan {intent, confidence, topk} dengan probabilitas finite (tidak NaN)."""
-    train_intent_if_needed()
-    x = [normalize_text(text)]
-    proba = _INTENT_PIPE.predict_proba(x)[0]  # type: ignore
-    classes = list(getattr(_INTENT_PIPE, "classes_", [])) or _INTENT_LABELS
-    pairs = sorted(zip(classes, proba), key=lambda z: float(z[1]), reverse=True)
-    topk = [{"intent": str(i), "confidence": float(s)} for i, s in pairs[:5]]
-    best = pairs[0]
-    return {"intent": str(best[0]), "confidence": float(best[1]), "topk": topk}
-
-
-# ===================== NER sederhana (regex) =====================
-
-_NER_PATTERNS = {
-    "RT": re.compile(r"\brt\s*0*([0-9]{1,3})\b", flags=re.I),
-    "RW": re.compile(r"\brw\s*0*([0-9]{1,3})\b", flags=re.I),
+# ---------- NER (regex sederhana) ----------
+NER_PATTERNS = {
+    "RT": re.compile(r"\brt\s*[:\-]?\s*(\d{1,3})\b", re.I),
+    "RW": re.compile(r"\brw\s*[:\-]?\s*(\d{1,3})\b", re.I),
+    "NAMA": re.compile(r"\bsaya\s+([A-Za-z ]{2,40})\b", re.I),
+    "ALAMAT": re.compile(r"\b(di|alamat)\s+([A-Za-z0-9 .\/\-]{3,80})", re.I),
 }
 
-def _extract_name(text: str) -> str | None:
-    t = normalize_text(text)
-    # pola "nama saya <...>" atau "saya <...>"
-    m = re.search(r"\bnama\s+saya\s+([a-zA-Z\.\-']{2,}(?:\s+[a-zA-Z\.\-']{2,}){0,2})", t)
-    if not m:
-        m = re.search(r"\bsaya\s+([a-zA-Z\.\-']{2,}(?:\s+[a-zA-Z\.\-']{2,}){0,2})", t)
-    if m:
-        name = m.group(1).strip().title()
-        bad = {"mau", "ingin", "lapor", "bertanya"}
-        if name.split()[0].lower() not in bad:
-            return name
-    return None
+def infer_ner(text: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for label, pat in NER_PATTERNS.items():
+        m = pat.search(text)
+        if not m:
+            continue
+        if label in ("RT", "RW"):
+            out[label] = m.group(1)
+        elif label == "ALAMAT":
+            out[label] = m.group(2).strip()
+        else:
+            out[label] = m.group(1).strip()
+    return out
 
-def _extract_address(text: str) -> str | None:
-    # ambil frasa setelah "di" atau "alamat" sampai sebelum kata kerja umum atau tanda baca
-    m = re.search(r"(?:alamat\s*[:\-]?\s*|di\s+)([^,.]+?)(?=\s+mau|\s+ingin|\s+lapor|,|\.|$)", text, flags=re.I)
-    if m:
-        return m.group(1).strip()
-    return None
+# ---------- INTENT: lazy load / train ----------
+_VEC: TfidfVectorizer | None = None
+_CLF: CalibratedClassifierCV | None = None
+_LABELS: List[str] = []
 
-def infer_ner(text: str) -> List[Dict[str, str]]:
-    """
-    Return list entitas: [{type,text}, ...]  dengan type ∈ {RT,RW,NAMA,ALAMAT}
-    """
-    ents: List[Dict[str, str]] = []
+def _read_csv(p: Path) -> pd.DataFrame:
+    return pd.read_csv(p, encoding="utf-8-sig")
 
-    for k, pat in _NER_PATTERNS.items():
-        for g in pat.findall(text):
-            ents.append({"type": k, "text": str(int(g))})  # hapus leading zero
+def train_intent_if_needed() -> None:
+    global _VEC, _CLF, _LABELS
+    if _VEC and _CLF and _LABELS:
+        return
+    # coba load dari disk
+    if INTENT_VECT_PATH.exists() and INTENT_CLF_PATH.exists():
+        _VEC = pickle.loads(INTENT_VECT_PATH.read_bytes())
+        _CLF = pickle.loads(INTENT_CLF_PATH.read_bytes())
+        _LABELS = getattr(_CLF, "classes_", []).tolist()
+        return
 
-    nm = _extract_name(text)
-    if nm:
-        ents.append({"type": "NAMA", "text": nm})
+    df = _read_csv(INTENT_TRAIN)
+    # kolom wajib: text,intent
+    df = df.dropna(subset=["text", "intent"])
+    X = df["text"].astype(str).apply(normalize_text)
+    y = df["intent"].astype(str)
 
-    al = _extract_address(text)
-    if al:
-        ents.append({"type": "ALAMAT", "text": al})
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, sublinear_tf=True)
+    base = LinearSVC()
+    clf = CalibratedClassifierCV(base, cv=5)  # supaya ada predict_proba
 
-    return ents
+    pipe = make_pipeline(vec, clf)
+    pipe.fit(X, y)
 
+    # simpan terpisah vectorizer & clf
+    _VEC = pipe.named_steps["tfidfvectorizer"]
+    _CLF = pipe.named_steps["calibratedclassifiercv"]
+    _LABELS = _CLF.classes_.tolist()
 
-# ===================== KB sederhana (RAG mini) =====================
+    INTENT_VECT_PATH.write_bytes(pickle.dumps(_VEC))
+    INTENT_CLF_PATH.write_bytes(pickle.dumps(_CLF))
 
-def _load_kb() -> pd.DataFrame:
-    kb_csv = DATA / "kb.csv"
-    if not kb_csv.exists():
-        # fallback KB minimal bila file belum ada
-        rows = [
-            {"title": "PSN 3M Plus", "text": "PSN 3M Plus adalah langkah utama pencegahan DBD: Menguras, Menutup, Mendaur ulang + upaya tambahan."},
-            {"title": "Fogging", "text": "Fogging dilakukan bila ada kasus DBD dan ditemukan jentik. PSN tetap prioritas."},
-            {"title": "Peran Jumantik", "text": "Jumantik memeriksa jentik secara rutin dan edukasi PSN kepada warga."},
-        ]
-        return pd.DataFrame(rows)
-    return pd.read_csv(kb_csv, encoding="utf-8-sig")
+def infer_intent(text: str) -> Tuple[str, float, List[Tuple[str, float]]]:
+    train_intent_if_needed()
+    assert _VEC and _CLF
+    X = _VEC.transform([normalize_text(text)])
+    proba = _CLF.predict_proba(X)[0]
+    labels = _CLF.classes_
+    pairs = sorted([(labels[i], float(proba[i])) for i in range(len(labels))],
+                   key=lambda x: x[1], reverse=True)
+    top = pairs[0]
+    return top[0], top[1], pairs[:3]
 
-_KB_DF: pd.DataFrame | None = None
+# ---------- KB search (TF-IDF local) ----------
 _KB_VEC: TfidfVectorizer | None = None
-_KB_MAT = None
+_KB_TEXTS: List[str] | None = None
+_KB_ROWS: List[Dict[str, str]] | None = None
 
 def _ensure_kb():
-    global _KB_DF, _KB_VEC, _KB_MAT
-    if _KB_DF is not None:
+    global _KB_VEC, _KB_TEXTS, _KB_ROWS
+    if _KB_VEC and _KB_TEXTS and _KB_ROWS:
         return
-    _KB_DF = _load_kb()
-    _KB_DF = _KB_DF.fillna("")
-    texts = (_KB_DF["title"].astype(str) + " . " + _KB_DF["text"].astype(str)).tolist()
-    _KB_VEC = TfidfVectorizer(ngram_range=(1,2), min_df=1).fit(texts)
-    _KB_MAT = _KB_VEC.transform(texts)
 
-def search_kb(query: str, topk: int = 5):
+    if KB_VECT_PATH.exists() and KB_TEXTS_PATH.exists():
+        _KB_VEC = pickle.loads(KB_VECT_PATH.read_bytes())
+        _KB_TEXTS = pickle.loads(KB_TEXTS_PATH.read_bytes())
+    else:
+        df = _read_csv(KB_CSV)
+        if not {"title", "text"}.issubset(df.columns):
+            raise RuntimeError("kb.csv wajib punya kolom: title,text")
+        texts = (df["title"].astype(str) + " . " + df["text"].astype(str)).tolist()
+        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True)
+        mat = vec.fit_transform([normalize_text(t) for t in texts])
+        KB_VECT_PATH.write_bytes(pickle.dumps(vec))
+        KB_TEXTS_PATH.write_bytes(pickle.dumps(texts))
+        _KB_VEC, _KB_TEXTS = vec, texts
+
+    # rows untuk metadata title/text
+    df = _read_csv(KB_CSV)
+    _KB_ROWS = df[["title", "text"]].to_dict(orient="records")
+
+def search_kb(query: str, topk: int = 3) -> List[Dict[str, Any]]:
     _ensure_kb()
+    assert _KB_VEC and _KB_TEXTS and _KB_ROWS
     qv = _KB_VEC.transform([normalize_text(query)])  # type: ignore
-    scores = (qv @ _KB_MAT.T).toarray().ravel()      # type: ignore
-    idx = np.argsort(-scores)[:topk]
+    mv = _KB_VEC.transform([normalize_text(t) for t in _KB_TEXTS])
+    # cosine (tfidf normalized, dot == cosine)
+    sims = (mv @ qv.T).toarray().ravel()
+    idx = sims.argsort()[::-1][:topk]
     out = []
     for i in idx:
+        sc = float(sims[i])
+        row = _KB_ROWS[i]
         out.append({
-            "score": float(scores[int(i)]),
-            "title": str(_KB_DF.iloc[int(i)]["title"]),   # type: ignore
-            "text":  str(_KB_DF.iloc[int(i)]["text"]),    # type: ignore
+            "score": sc,
+            "title": row["title"],
+            "snippet": row["text"][:500],
+            "text": row["text"],
         })
     return out
 
-def answer_rule_or_rag(text: str) -> Dict[str, Any]:
-    q = normalize_text(text)
-    # aturan singkat
-    if "fogging" in q:
-        ans = ("Fogging dilakukan bila ada **kasus DBD terkonfirmasi** dan **ditemukan jentik** di sekitar lokasi. "
-               "PSN 3M Plus tetap menjadi langkah utama pencegahan. Silakan koordinasi dengan RT/RW atau puskesmas.")
-        return {"answer": ans, "source": "rule"}
-    # default: RAG mini
-    hits = search_kb(q, topk=3)
-    context = " ".join([h["text"] for h in hits])
-    answer = context if context else "Maaf, saya belum menemukan jawaban di basis pengetahuan."
-    return {"answer": answer, "source": "kb", "results": hits}
+# ---------- RULE answers ----------
+RULE_ANSWERS = {
+    "prosedur_fogging": (
+        "Fogging **bukan** pencegahan utama DBD. Fokus PSN 3M Plus mingguan. "
+        "Fogging dilakukan **selektif** setelah ada kasus dan asesmen Puskesmas/Kelurahan."
+    ),
+    "jadwal_kunjungan": (
+        "Jadwal Jumantik diatur per-RW setiap minggu. "
+        "Saya cek jadwal terdekat berdasarkan RW yang kamu sebut."
+    ),
+    "lapor_jentik": (
+        "Terima kasih laporannya. Mohon kirim format: **Nama**, **Alamat**, **RT/RW**, dan **lokasi jentik** "
+        "(bak mandi, talang, vas, dsb). Petugas akan menindaklanjuti."
+    ),
+}
+
+def _rule_answer(intent: str, text: str, ents: Dict[str, str]) -> Dict[str, Any] | None:
+    if intent not in RULE_ANSWERS:
+        return None
+    if intent == "jadwal_kunjungan":
+        rw = ents.get("RW")
+        if rw:
+            rec = get_schedule_for_rw(rw)
+            msg = (f"{RULE_ANSWERS[intent]} \n"
+                   f"• RW {int(rw):02d} dijadwalkan pada **{rec['next_date']}**. "
+                   f"Jika kunjungan hari ini sudah selesai, balas dengan: "
+                   f"**kunjungan RW {int(rw):02d} selesai** untuk menggeser jadwal otomatis.")
+            return {"mode": "rule", "text": msg}
+        # tanpa RW, berikan instruksi
+        return {"mode": "rule", "text": RULE_ANSWERS[intent] + " Sertakan RW ya (mis. RW 05)."}
+    return {"mode": "rule", "text": RULE_ANSWERS[intent]}
+
+def _maybe_complete_visit(text: str) -> Dict[str, Any] | None:
+    m = re.search(r"kunjungan\s*rw\s*(\d{1,3})\s*selesai", text, re.I)
+    if not m:
+        return None
+    rw = m.group(1)
+    rec = advance_after_visit(rw)
+    return {
+        "mode": "rule",
+        "text": f"Terima kasih. Jadwal RW {int(rw):02d} digeser otomatis ke **{rec['next_date']}**."
+    }
+def _predict_proba_safe(clf, X):
+    """Kembalikan probabilitas (n_samples, n_classes) sebisanya."""
+    if hasattr(clf, "predict_proba"):
+        return clf.predict_proba(X)
+    if hasattr(clf, "decision_function"):
+        dec = clf.decision_function(X)
+        if dec.ndim == 1:
+            dec = dec.reshape(-1, 1)
+        # softmax
+        dec = dec - dec.max(axis=1, keepdims=True)
+        exps = np.exp(dec)
+        return exps / (exps.sum(axis=1, keepdims=True) + 1e-9)
+    # fallback: rata
+    n = getattr(clf, "classes_", [])
+    k = len(n) if len(n) > 0 else 1
+    return np.ones((len(X), k)) / k
+
+def answer_rule_or_rag(q: str) -> Dict[str, Any]:
+    # perintah khusus 'kunjungan RW XX selesai'
+    done = _maybe_complete_visit(q)
+    if done:
+        return done
+
+    ents = infer_ner(q)
+    intent, conf, _ = infer_intent(q)
+
+    if ANSWER_MODE in ("rule", "hybrid") and conf >= INTENT_CONFIDENCE_MIN:
+        ans = _rule_answer(intent, q, ents)
+        if ans:
+            return ans
+
+    if ANSWER_MODE in ("rag", "hybrid"):
+        try:
+            hits = search_kb(q, topk=3)
+            if hits and hits[0]["score"] >= RAG_MIN_SIM:
+                best = hits[0]
+                return {"mode": "rag", "text": best["snippet"], "source": best["title"]}
+        except Exception:
+            pass
+
+    return {"mode": "fallback", "text": FALLBACK_ANSWER}

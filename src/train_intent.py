@@ -1,108 +1,68 @@
+# src/train_intent.py
+from __future__ import annotations
+
+import pickle
 from pathlib import Path
-import numpy as np
-from datasets import load_dataset, DatasetDict
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    Trainer,
-    TrainingArguments,
-    DataCollatorWithPadding,
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import classification_report, f1_score
+
+from .config import (
+    INTENT_TRAIN, INTENT_VAL,
+    INTENT_VECT_PATH, INTENT_CLF_PATH,
 )
-from sklearn.metrics import accuracy_score, f1_score
-from src.config import settings
+from .simple_nlp import normalize_text
 
-def _assert_data():
-    if not settings.intent_train_csv.exists():
-        raise FileNotFoundError(f"Missing: {settings.intent_train_csv}")
-    if not settings.intent_val_csv.exists():
-        raise FileNotFoundError(f"Missing: {settings.intent_val_csv}")
 
-def load_intent_datasets() -> tuple[DatasetDict, list[str], dict, dict]:
-    files = {
-        "train": str(settings.intent_train_csv),
-        "validation": str(settings.intent_val_csv),
-    }
-    ds = load_dataset("csv", data_files=files)
-
-    # kumpulkan label unik
-    labels = sorted(list(set(ds["train"]["intent"]) | set(ds["validation"]["intent"])))
-    label2id = {lbl: i for i, lbl in enumerate(labels)}
-    id2label = {i: lbl for lbl, i in label2id.items()}
-
-    def mapper(ex):
-        ex["label"] = label2id[ex["intent"]]
-        return ex
-
-    ds = ds.map(mapper)
-    return ds, labels, label2id, id2label
-
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    preds = logits.argmax(-1)
-    acc = accuracy_score(labels, preds)
-    f1m = f1_score(labels, preds, average="macro", zero_division=0)
-    return {"eval_acc": acc, "eval_f1_macro": f1m}
-
-def main():
-    _assert_data()
-    tok = AutoTokenizer.from_pretrained(settings.intent_model_name)
-
-    ds, labels, label2id, id2label = load_intent_datasets()
-
-    def tok_map(batch):
-        return tok(
-            batch["text"],
-            truncation=True,
-            padding=False,
-            max_length=128,
+def assert_file(path: Path, label: str):
+    if not Path(path).exists():
+        raise FileNotFoundError(
+            f"{label} tidak ditemukan di: {path}\n"
+            "Pastikan file ada di `data/kb/` atau `data/` dengan header `text,intent`."
         )
 
-    ds = ds.map(tok_map, batched=True)
-    ds = ds.remove_columns([c for c in ds["train"].column_names if c not in ["input_ids","token_type_ids","attention_mask","label"]])
-    ds.set_format(type="torch")
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        settings.intent_model_name,
-        num_labels=len(labels),
-        id2label=id2label,
-        label2id=label2id,
+def main():
+    assert_file(INTENT_TRAIN, "INTENT_TRAIN")
+    assert_file(INTENT_VAL, "INTENT_VAL")
+
+    df_tr = pd.read_csv(INTENT_TRAIN, encoding="utf-8-sig").dropna()
+    df_va = pd.read_csv(INTENT_VAL,   encoding="utf-8-sig").dropna()
+
+    Xtr = df_tr["text"].astype(str).apply(normalize_text)
+    ytr = df_tr["intent"].astype(str)
+
+    Xva = df_va["text"].astype(str).apply(normalize_text)
+    yva = df_va["intent"].astype(str)
+
+    # TF-IDF + Logistic Regression (multinomial) — aman untuk dataset kecil
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True)
+    clf = LogisticRegression(
+        max_iter=1000,
+        n_jobs=None,
+        class_weight="balanced",   # bantu kelas minoritas
+        multi_class="auto",        # otomatis multinomial dgn lbfgs
+        solver="lbfgs",
     )
 
-    collator = DataCollatorWithPadding(tokenizer=tok)
+    pipe = make_pipeline(vec, clf)
+    pipe.fit(Xtr, ytr)
 
-    # --- di src/train_intent.py (ganti argumen training) ---
-    args = TrainingArguments(
-        output_dir=str(model_dir),
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        learning_rate=2e-5,          # lebih konservatif
-        num_train_epochs=12,          # dari 8 -> 12
-        weight_decay=0.01,
-        warmup_ratio=0.1,             # tambahkan warmup
-        evaluation_strategy="epoch",
-        save_strategy="no",
-        logging_steps=10,
-        load_best_model_at_end=False,
-        report_to="none",
-        seed=42,
-    )
+    yhat = pipe.predict(Xva)
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=ds["train"],
-        eval_dataset=ds["validation"],
-        tokenizer=tok,
-        data_collator=collator,
-        compute_metrics=compute_metrics,
-    )
-    trainer.train()
-    # simpan tokenizer + labels
-    settings.intent_hf_dir.mkdir(parents=True, exist_ok=True)
-    (settings.intent_hf_dir / "labels.txt").write_text("\n".join(labels), encoding="utf-8")
-    trainer.save_model(settings.intent_hf_dir)
-    tok.save_pretrained(settings.intent_hf_dir)
-    print(f"Training selesai → {settings.intent_hf_dir}")
+    print(classification_report(yva, yhat))
+    print("Macro F1:", f1_score(yva, yhat, average="macro"))
+
+    # simpan komponen pipeline agar kompatibel dgn loader di simple_nlp
+    vec_fitted = pipe.named_steps["tfidfvectorizer"]
+    clf_fitted = pipe.named_steps["logisticregression"]
+
+    INTENT_VECT_PATH.write_bytes(pickle.dumps(vec_fitted))
+    INTENT_CLF_PATH.write_bytes(pickle.dumps(clf_fitted))
+    print(f"Saved -> {INTENT_VECT_PATH.name}, {INTENT_CLF_PATH.name}")
+
 
 if __name__ == "__main__":
     main()
