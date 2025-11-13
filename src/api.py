@@ -1,20 +1,12 @@
 from __future__ import annotations
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from pathlib import Path
-from fastapi.responses import HTMLResponse
 
-from .simple_nlp import infer_intent, infer_ner, answer_rule_or_rag
+from .config import WEB_INDEX_PATH
+from .simple_nlp import intent_payload, entities_payload, answer_rule_or_rag
 
-app = FastAPI(title="Jumantik-Bot")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Jumantik Bot")
 
 class DemoReq(BaseModel):
     text: str
@@ -23,19 +15,24 @@ class DemoReq(BaseModel):
 def healthz():
     return {"ok": True}
 
-@app.get("/web/", response_class=HTMLResponse)
-def web():
-    html = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(html)
+@app.get("/web/")
+def web_ui():
+    return FileResponse(WEB_INDEX_PATH)
 
 @app.post("/demo")
 def demo_api(req: DemoReq):
-    intent, conf, topk = infer_intent(req.text)
-    ents = infer_ner(req.text)
-    ans = answer_rule_or_rag(req.text)
-    return {
-        "text": req.text,
-        "intent": {"label": intent, "confidence": conf, "topk": topk},
-        "ner": ents,
-        "answer": ans,
-    }
+    q = (req.text or "").strip()
+    intent = intent_payload(q)
+    ents = entities_payload(q)
+    ans = answer_rule_or_rag(q)
+    # struktur disesuaikan dengan index.html
+    return JSONResponse({
+        "text": q,
+        "intent": intent,
+        "entities": ents,
+        "answer": {
+            "mode": ans.get("mode", "-"),
+            "text": ans.get("text") or ans.get("answer") or "-",
+            "refs": [ans.get("source")] if ans.get("source") else [],
+        },
+    })

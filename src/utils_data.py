@@ -1,70 +1,43 @@
 from __future__ import annotations
 from pathlib import Path
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Dict, Any
+from .config import DATA_DIR
 
-from .config import SCHEDULE_JSON
+_SCH_FILE = DATA_DIR / "schedule.json"
 
-def _today() -> date:
-    return datetime.now().date()
+def _load_sched() -> Dict[str, Any]:
+    if _SCH_FILE.exists():
+        try:
+            return json.loads(_SCH_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    # seed default: semua RW dijadwalkan hari Sabtu minggu ini
+    base = date.today()
+    # cari Sabtu terdekat (atau hari ini kalau Sabtu)
+    dow = base.weekday()  # Mon=0..Sun=6
+    delta = (5 - dow) % 7
+    next_sat = base + timedelta(days=delta)
+    data = {"rw": {f"{i:02d}": {"next_date": str(next_sat)} for i in range(1, 51)}}
+    _SCH_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return data
 
-def _load_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-def _save_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-# -------- Schedule helpers (per-RW) --------
-def load_schedule() -> Dict[str, Any]:
-    return _load_json(SCHEDULE_JSON)
-
-def save_schedule(data: Dict[str, Any]) -> None:
-    _save_json(SCHEDULE_JSON, data)
-
-def _next_week(d: date) -> date:
-    return d + timedelta(days=7)
+def _save_sched(obj: Dict[str, Any]) -> None:
+    _SCH_FILE.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def get_schedule_for_rw(rw: str) -> Dict[str, Any]:
-    """Return {'rw': '05', 'next_date': 'YYYY-MM-DD'} and auto-roll if passed."""
-    db = load_schedule()
-    key = str(int(rw))  # normalisasi '05' -> '5'
-    rec = db.get(key)
-
-    if not rec:
-        # Default: set ke Sabtu terdekat
-        base = _today()
-        # cari hari Sabtu (weekday=5)
-        days_ahead = (5 - base.weekday()) % 7
-        nxt = base + timedelta(days=days_ahead)
-        rec = {"rw": key, "next_date": nxt.isoformat()}
-        db[key] = rec
-        save_schedule(db)
-        return rec
-
-    # rollover kalau tanggal sudah lewat
-    nxt = datetime.fromisoformat(rec["next_date"]).date()
-    while nxt < _today():
-        nxt = _next_week(nxt)
-    if nxt.isoformat() != rec["next_date"]:
-        rec["next_date"] = nxt.isoformat()
-        db[key] = rec
-        save_schedule(db)
-    return rec
+    rw = f"{int(rw):02d}"
+    sched = _load_sched()
+    return sched["rw"].get(rw, {"next_date": str(date.today())})
 
 def advance_after_visit(rw: str) -> Dict[str, Any]:
-    """Panggil ini ketika kunjungan RW sudah dilakukan; jadwal geser seminggu."""
-    db = load_schedule()
-    key = str(int(rw))
-    rec = db.get(key) or {"rw": key, "next_date": _today().isoformat()}
-    nxt = datetime.fromisoformat(rec["next_date"]).date()
-    rec["next_date"] = _next_week(max(nxt, _today())).isoformat()
-    db[key] = rec
-    save_schedule(db)
-    return rec
+    rw = f"{int(rw):02d}"
+    sched = _load_sched()
+    cur = sched["rw"].get(rw, {"next_date": str(date.today())})
+    d = date.fromisoformat(cur["next_date"])
+    # geser 7 hari ke depan
+    new_d = d + timedelta(days=7)
+    sched["rw"][rw] = {"next_date": str(new_d)}
+    _save_sched(sched)
+    return sched["rw"][rw]
